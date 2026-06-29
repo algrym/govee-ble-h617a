@@ -65,15 +65,34 @@ Home Assistant effect dropdown.
   shared adapter; `available` reflects the BT stack; state survives restarts via
   `RestoreEntity`. Effect names are rendered readably (`Category - Scene`).
 
-### Known limitations
+### Scene speed control
 
-- **Scene speed** is intrinsic to each scene's payload and is not yet adjustable;
-  most scenes therefore play faster than the app default. The separate BLE speed
-  command has not been identified (it is **not** a trailing byte on the activate
-  packet).
-- A small number of scenes whose intrinsic speed is ~0 load correct colours but
-  appear static (e.g. `Festival - Carnival`) — likely the same missing speed
-  command.
+There is **no separate BLE "speed" command**. The Govee app sets a scene's speed
+by *rewriting bytes inside the `scenceParam` blob* before uploading it: it decodes
+the effect segments and overwrites their colour/move/brightness timing fields with
+values drawn from the scene's own `speedInfo` lookup table at a chosen index. This
+fork reproduces that rewrite (`govee_scene_speed.py`), so scene speed is adjustable
+from Home Assistant. The speed tables already live in the bundled catalogue, so no
+extra capture is needed; an unrecognised blob is uploaded untouched.
+
+Two entity services are exposed (target a Govee light entity):
+
+- **`govee-ble-lights.set_speed`** — set *this strip's* speed: an integer level
+  (`0` = liveliest; higher = calmer, range varies per scene), `"auto"` (default —
+  follow the scene's saved/Govee-recommended speed), or `"off"` (upload the scene
+  baseline untouched). Re-applies the current effect immediately.
+- **`govee-ble-lights.set_scene_speed`** — save (or clear) a per-scene speed
+  preset for the current effect. An integer pins that scene's speed for every strip
+  that's on `"auto"`; `"auto"` clears the preset back to Govee's default. Presets
+  persist to Home Assistant storage (survive restarts and HACS updates).
+
+Resolution precedence: **strip's pinned level → saved scene preset → `auto`
+(Govee's per-scene `defaultIndex`)**. Each light exposes `speed_index`,
+`scene_speed_preset` and `resolved_speed` attributes so the active level is visible.
+
+> Speed "feel" is per-scene: the byte's direction and range depend on the scene's
+> colour type, so the same level looks different across scenes. Inherently flashing
+> scenes (e.g. fireworks) still flicker even at their calmest level.
 
 ---
 

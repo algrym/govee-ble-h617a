@@ -16,18 +16,55 @@ from homeassistant.components.light import (ATTR_BRIGHTNESS, ATTR_RGB_COLOR, ATT
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.storage import Store
+
+import voluptuous as vol
 
 from .const import DOMAIN
 from pathlib import Path
 import json
 from .govee_utils import prepareMultiplePacketsData
+from .govee_scene_speed import apply_scene_speed
 import base64
+from homeassistant.helpers.storage import Store
 from . import Hub
 
 _LOGGER = logging.getLogger(__name__)
+
+# Per-scene speed presets, shared by all strips and persisted to HA storage so they
+# survive restarts and HACS updates. Maps an effect's display name to a chosen speed
+# level (int) or the string "auto" (follow Govee's default) / "off" (scene baseline).
+# A scene absent from the map is treated as "auto".
+_SCENE_SPEED_STORE_KEY = "govee_ble_lights_scene_speeds"
+_SCENE_SPEED_VERSION = 1
+_scene_speed_presets: dict[str, object] = {}
+_scene_speed_store: Store | None = None
+_scene_speed_loaded = False
+_scene_speed_lock = asyncio.Lock()
+
+
+async def _ensure_scene_presets(hass) -> None:
+    """Load the shared scene-speed presets once (idempotent across all entities)."""
+    global _scene_speed_store, _scene_speed_loaded
+    async with _scene_speed_lock:
+        if _scene_speed_loaded:
+            return
+        _scene_speed_store = Store(hass, _SCENE_SPEED_VERSION, _SCENE_SPEED_STORE_KEY)
+        try:
+            data = await _scene_speed_store.async_load()
+            if isinstance(data, dict):
+                _scene_speed_presets.update(data)
+        except Exception as err:  # noqa: BLE001 - bad store shouldn't break the light
+            _LOGGER.warning("Govee: could not load scene-speed presets: %s", err)
+        _scene_speed_loaded = True
+
+
+async def _save_scene_presets() -> None:
+    if _scene_speed_store is not None:
+        await _scene_speed_store.async_save(dict(_scene_speed_presets))
 
 UUID_CONTROL_CHARACTERISTIC = '00010203-0405-0607-0809-0a0b0c0d2b11'
 EFFECT_PARSE = re.compile(r"\[(\d+)/(\d+)/(\d+)/(\d+)]")
@@ -83,6 +120,25 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
     elif hub.address is not None:
         ble_device = bluetooth.async_ble_device_from_address(hass, hub.address.upper(), False)
         async_add_entities([GoveeBluetoothLight(hub, ble_device, config_entry)])
+
+        platform = entity_platform.async_get_current_platform()
+
+        # This strip's current speed: an int level (0 = liveliest; higher = calmer,
+        # varies per scene), "auto" (follow the scene's saved/Govee default), or
+        # "off" (scene baseline). Re-applies the current effect immediately.
+        speed_value = vol.Any("auto", "off", vol.Coerce(int))
+        platform.async_register_entity_service(
+            "set_speed",
+            {vol.Required("speed_index"): speed_value},
+            "async_set_speed",
+        )
+        # Save (or clear) the per-scene speed preset for the current effect. An int
+        # pins that scene's speed everywhere; "auto" reverts it to Govee's default.
+        platform.async_register_entity_service(
+            "set_scene_speed",
+            {vol.Required("speed_index"): vol.Any("auto", "off", vol.Coerce(int))},
+            "async_set_scene_speed",
+        )
 
 
 class GoveeAPILight(LightEntity, dict):
@@ -226,6 +282,9 @@ class GoveeBluetoothLight(RestoreEntity, LightEntity):
         self._effect_indexes: dict[str, tuple[int, int, int, int]] = {}
         self._model_json: dict | None = None
         self._attr_effect_list = []
+        # This strip's current speed setting: "auto" (follow the scene's saved/Govee
+        # default), an int level, or "off" (scene baseline, no speed rewrite).
+        self._speed_index: object = "auto"
 
     async def async_added_to_hass(self) -> None:
         """Restore prior state and load the effect catalogue (off the event loop)."""
@@ -238,6 +297,11 @@ class GoveeBluetoothLight(RestoreEntity, LightEntity):
             rgb = last_state.attributes.get("rgb_color")
             self._rgb_color = tuple(rgb) if rgb else None
             self._effect = last_state.attributes.get("effect")
+            restored_speed = last_state.attributes.get("speed_index")
+            if restored_speed is not None:
+                self._speed_index = restored_speed
+
+        await _ensure_scene_presets(self.hass)
 
         await self._async_load_effects()
 
@@ -405,11 +469,28 @@ class GoveeBluetoothLight(RestoreEntity, LightEntity):
             scene = (self._model_json['data']['categories'][category_idx]
                      ['scenes'][scene_idx])
             light_effect = scene['lightEffects'][light_idx]
-            special_effect = light_effect['specialEffect'][special_idx]
+            specials = light_effect['specialEffect']
+            # Prefer the variant whose supportSku matches this model: its blob is
+            # the same bytes, but it carries the per-model speedInfo we apply below.
+            special_effect = next(
+                (se for se in specials
+                 if self._model in (se.get('supportSku') or [])),
+                specials[special_idx])
             param = base64.b64decode(special_effect['scenceParam'])
         except (KeyError, IndexError, ValueError) as err:
             _LOGGER.warning("Govee %s: bad effect data for %r: %s", self._mac, effect, err)
             return None
+
+        # Apply the resolved speed level by rewriting the speed bytes in the blob the
+        # way the Govee app does. resolve returns "off" (upload baseline untouched),
+        # "auto" (use Govee's per-scene defaultIndex), or an int level. See
+        # govee_scene_speed for the byte-level details.
+        speed_info = special_effect.get('speedInfo') or {}
+        if speed_info.get('supSpeed') and speed_info.get('config'):
+            level = self._resolve_speed(effect)
+            if level != "off":
+                override = None if level == "auto" else level
+                param = apply_scene_speed(param, speed_info['config'], override)
 
         packets = list(prepareMultiplePacketsData(0xa3,
                                                   array.array('B', [0x02]),
@@ -525,6 +606,55 @@ class GoveeBluetoothLight(RestoreEntity, LightEntity):
                 await client.disconnect()
             except Exception:  # noqa: BLE001 - best-effort teardown
                 pass
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Surface the speed settings: this strip's level, the current scene's saved
+        preset, and the level that actually resolves for the current effect."""
+        scene_preset = (_scene_speed_presets.get(self._effect, "auto")
+                        if self._effect else None)
+        return {
+            "speed_index": self._speed_index,
+            "scene_speed_preset": scene_preset,
+            "resolved_speed": self._resolve_speed(self._effect) if self._effect else None,
+        }
+
+    def _resolve_speed(self, effect: str | None) -> object:
+        """Resolve the effective speed for an effect: an int level, "auto" (Govee
+        default), or "off" (baseline). Precedence: this strip's pinned level >
+        the scene's saved preset > "auto"."""
+        if isinstance(self._speed_index, int) or self._speed_index == "off":
+            return self._speed_index
+        # strip is on "auto" -> defer to the scene's saved preset (default "auto")
+        if effect is None:
+            return "auto"
+        return _scene_speed_presets.get(effect, "auto")
+
+    async def async_set_speed(self, speed_index) -> None:
+        """Set THIS strip's current speed and re-apply the current effect now."""
+        self._speed_index = speed_index
+        if self._effect:
+            await self.async_turn_on(effect=self._effect)
+        self.async_write_ha_state()
+
+    async def async_set_scene_speed(self, speed_index) -> None:
+        """Save (or clear) the current scene's speed preset for all strips.
+
+        An int pins that scene's speed; "auto" removes the preset (Govee default).
+        The preset only takes visible effect where a strip's own speed is "auto".
+        """
+        if self._effect is None:
+            _LOGGER.warning("Govee %s: set_scene_speed with no active effect", self._mac)
+            return
+        if speed_index == "auto":
+            _scene_speed_presets.pop(self._effect, None)
+        else:
+            _scene_speed_presets[self._effect] = speed_index
+        await _save_scene_presets()
+        # Re-apply here so the change is visible immediately on this strip too.
+        if self._speed_index == "auto":
+            await self.async_turn_on(effect=self._effect)
+        self.async_write_ha_state()
 
     def _prepareSinglePacketData(self, cmd, payload):
         if not isinstance(cmd, int):
