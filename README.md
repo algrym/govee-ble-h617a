@@ -29,6 +29,54 @@ A powerful and seamless integration to control your Govee lighting devices via G
 
 ---
 
+## Fork additions: H617A dynamic scenes over BLE
+
+This fork adds working **dynamic scene** support for the **H617A** RGBIC strip over
+local BLE, plus a more resilient BLE transport. Changes live in
+`custom_components/govee-ble-lights/light.py` and add the scene catalogue
+`jsons/H617A.json` (payload-identical to the already-bundled `H617C.json`).
+
+### The missing "activate scene" command
+
+On the H617A, uploading a scene's `scenceParam` with the `0xa3` multi-packet
+protocol only *loads* the scene into the strip's memory — it does **not** switch
+the strip out of manual-colour mode, so the scene never plays. The strip starts
+animating only after an explicit **activate** packet:
+
+```
+33 05 04 <sceneCodeLo> <sceneCodeHi>      # sceneCode is 2-byte little-endian
+```
+
+`sceneCode` comes from the model JSON per light-effect. So setting a scene is two
+steps over one BLE session: **(1)** send the `0xa3` `scenceParam` upload, **(2)**
+send the activate packet. This was reverse-engineered live on H617A hardware;
+~25 scenes across all nine categories animate correctly from the standard
+Home Assistant effect dropdown.
+
+### BLE transport hardening
+
+- All packets of a command ride **one** freshly-established connection; the link
+  is held open briefly so a scene upload commits, then closed on an idle timer
+  (so it doesn't hog a Bluetooth-proxy connection slot).
+- A held connection is never reused (an idle strip behind an ESPHome BLE proxy
+  keeps reporting `is_connected == True` while silently dropping
+  write-without-response packets).
+- Per-entity command lock + a module-level connect lock serialise access to the
+  shared adapter; `available` reflects the BT stack; state survives restarts via
+  `RestoreEntity`. Effect names are rendered readably (`Category - Scene`).
+
+### Known limitations
+
+- **Scene speed** is intrinsic to each scene's payload and is not yet adjustable;
+  most scenes therefore play faster than the app default. The separate BLE speed
+  command has not been identified (it is **not** a trailing byte on the activate
+  packet).
+- A small number of scenes whose intrinsic speed is ~0 load correct colours but
+  appear static (e.g. `Festival - Carnival`) — likely the same missing speed
+  command.
+
+---
+
 ## Configuration
 
 ### What is needed
