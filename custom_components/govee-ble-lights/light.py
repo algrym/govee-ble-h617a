@@ -74,6 +74,13 @@ PERCENT_MODELS = ['H617A']
 # Number of BLE write attempts before a command is reported as failed.
 MAX_COMMAND_ATTEMPTS = 3
 
+# When the strip only accepts write-without-response, those writes are never
+# ACKed: behind a BLE proxy at range a dropped packet vanishes silently and the
+# scene upload never lands (the strip just replays its last frame). Pace the
+# chunked packets so a distant proxy doesn't overrun and drop them. Acknowledged
+# writes (Write Request) self-pace, so this only applies to the fallback path.
+INTER_PACKET_DELAY = 0.02  # seconds
+
 # A dynamic scene needs the BLE link held open for a few seconds after upload to
 # commit (then it persists, like closing the Govee app). We keep the connection
 # open after every command and close it only after this idle window, so we don't
@@ -543,13 +550,27 @@ class GoveeBluetoothLight(RestoreEntity, LightEntity):
             for attempt in range(1, MAX_COMMAND_ATTEMPTS + 1):
                 try:
                     self._client = await self._connect()
-                    _LOGGER.debug("Govee %s: connected=%s, sending %d packets (%d bytes total)",
-                                  self._mac, self._client.is_connected, len(commands),
+                    # Prefer acknowledged writes (Write Request) when the strip
+                    # offers them: at range a write-without-response packet is
+                    # dropped silently, so a scene upload never lands and the
+                    # strip replays its old frame. An ACKed write raises on a
+                    # dropped packet, so the retry loop below actually re-sends
+                    # instead of silently no-op'ing. Fall back to write-without-
+                    # response (paced) when the characteristic can't do requests.
+                    char = self._client.services.get_characteristic(UUID_CONTROL_CHARACTERISTIC)
+                    use_response = char is not None and "write" in char.properties
+                    target = char if char is not None else UUID_CONTROL_CHARACTERISTIC
+                    _LOGGER.debug("Govee %s: connected=%s, write_response=%s, sending %d packets (%d bytes total)",
+                                  self._mac, self._client.is_connected, use_response, len(commands),
                                   sum(len(c) for c in commands))
                     for idx, command in enumerate(commands):
-                        await self._client.write_gatt_char(UUID_CONTROL_CHARACTERISTIC, command, False)
+                        await self._client.write_gatt_char(target, command, response=use_response)
                         _LOGGER.debug("Govee %s: wrote packet %d/%d (%d bytes)",
                                       self._mac, idx + 1, len(commands), len(command))
+                        # Pace the unacknowledged fallback so a distant proxy
+                        # doesn't overrun; ACKed writes already self-pace.
+                        if not use_response and idx + 1 < len(commands):
+                            await asyncio.sleep(INTER_PACKET_DELAY)
                     # Leave the link open so the strip can commit, then auto-close.
                     self._schedule_idle_disconnect()
                     return
