@@ -61,6 +61,12 @@ Home Assistant effect dropdown.
 - A held connection is never reused (an idle strip behind an ESPHome BLE proxy
   keeps reporting `is_connected == True` while silently dropping
   write-without-response packets).
+- Writes use **acknowledged Write Requests** (`response=True`) when the control
+  characteristic advertises the `write` property, so a packet dropped at range
+  *raises* instead of vanishing — the retry loop then actually re-sends it.
+  (Previously every write was write-without-response, so a far strip behind a
+  BLE proxy would silently miss a scene upload and replay its last frame.) Falls
+  back to paced write-without-response when the characteristic only supports it.
 - Per-entity command lock + a module-level connect lock serialise access to the
   shared adapter; `available` reflects the BT stack; state survives restarts via
   `RestoreEntity`. Effect names are rendered readably (`Category - Scene`).
@@ -93,6 +99,28 @@ Resolution precedence: **strip's pinned level → saved scene preset → `auto`
 > Speed "feel" is per-scene: the byte's direction and range depend on the scene's
 > colour type, so the same level looks different across scenes. Inherently flashing
 > scenes (e.g. fireworks) still flicker even at their calmest level.
+
+---
+
+## Installation
+
+### Via HACS (custom repository)
+
+This fork isn't in the HACS default store, so add it as a custom repository:
+
+1. In Home Assistant, open **HACS → Integrations**.
+2. Top-right **⋮ → Custom repositories**.
+3. Add repository `https://github.com/algrym/govee-ble-h617a`, category **Integration**.
+4. Find **Govee BLE Light Advanced** in the list and **Download** it (pick the latest
+   release — H617A scene support and speed control landed in `v0.1.5`).
+5. **Restart Home Assistant** to load the integration.
+6. Add it from **Settings → Devices & Services** — Govee strips in BLE range are
+   auto-discovered; select your device model when prompted.
+
+> Installing from a custom repository pins your install to this fork. To update,
+> HACS surfaces new releases of *this* repo; it won't pull from the original
+> upstream. The integration domain is `govee-ble-lights`, so only one Govee BLE
+> integration of this lineage can be installed at a time.
 
 ---
 
