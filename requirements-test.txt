@@ -1,0 +1,4 @@
+# Dev/test dependencies for the offline codec tests (tests/).
+# These tests need no Home Assistant, Bluetooth, or hardware — just pytest.
+#   python -m pytest
+pytest>=7
