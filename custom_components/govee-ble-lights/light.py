@@ -27,7 +27,7 @@ from .const import DOMAIN
 from pathlib import Path
 import json
 from .govee_utils import prepareMultiplePacketsData
-from .govee_scene_speed import apply_scene_speed
+from .govee_scene_speed import apply_scene_speed, apply_move_override
 import base64
 from homeassistant.helpers.storage import Store
 from . import Hub
@@ -145,6 +145,16 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
             "set_scene_speed",
             {vol.Required("speed_index"): vol.Any("auto", "off", vol.Coerce(int))},
             "async_set_scene_speed",
+        )
+        # EXPERIMENTAL: force the raw movement-speed byte (moveIn + moveAll) on
+        # every segment, bypassing Govee's curated table to reach the off-menu
+        # range (0-255) the strip still honours. Animates "band-scroll" scenes
+        # like Festival - Carnival whose table values (229-252) all render
+        # static on the H617A. "off" clears the override (back to table speed).
+        platform.async_register_entity_service(
+            "set_move",
+            {vol.Required("move"): vol.Any("off", vol.Coerce(int))},
+            "async_set_move",
         )
 
 
@@ -292,6 +302,9 @@ class GoveeBluetoothLight(RestoreEntity, LightEntity):
         # This strip's current speed setting: "auto" (follow the scene's saved/Govee
         # default), an int level, or "off" (scene baseline, no speed rewrite).
         self._speed_index: object = "auto"
+        # EXPERIMENTAL raw movement-speed override (moveIn+moveAll byte), or None
+        # to use the normal table-based speed.
+        self._move_override: int | None = None
 
     async def async_added_to_hass(self) -> None:
         """Restore prior state and load the effect catalogue (off the event loop)."""
@@ -307,6 +320,9 @@ class GoveeBluetoothLight(RestoreEntity, LightEntity):
             restored_speed = last_state.attributes.get("speed_index")
             if restored_speed is not None:
                 self._speed_index = restored_speed
+            restored_move = last_state.attributes.get("move_override")
+            if isinstance(restored_move, int):
+                self._move_override = restored_move
 
         await _ensure_scene_presets(self.hass)
 
@@ -499,6 +515,12 @@ class GoveeBluetoothLight(RestoreEntity, LightEntity):
                 override = None if level == "auto" else level
                 param = apply_scene_speed(param, speed_info['config'], override)
 
+        # EXPERIMENTAL raw movement override, applied after the table-based speed
+        # so it wins. Off-menu values animate band-scroll scenes Govee's curated
+        # range (229-252) can't move. No-op when unset or on an unknown layout.
+        if self._move_override is not None:
+            param = apply_move_override(param, self._move_override)
+
         packets = list(prepareMultiplePacketsData(0xa3,
                                                   array.array('B', [0x02]),
                                                   array.array('B', param)))
@@ -638,6 +660,7 @@ class GoveeBluetoothLight(RestoreEntity, LightEntity):
             "speed_index": self._speed_index,
             "scene_speed_preset": scene_preset,
             "resolved_speed": self._resolve_speed(self._effect) if self._effect else None,
+            "move_override": self._move_override,
         }
 
     def _resolve_speed(self, effect: str | None) -> object:
@@ -674,6 +697,19 @@ class GoveeBluetoothLight(RestoreEntity, LightEntity):
         await _save_scene_presets()
         # Re-apply here so the change is visible immediately on this strip too.
         if self._speed_index == "auto":
+            await self.async_turn_on(effect=self._effect)
+        self.async_write_ha_state()
+
+    async def async_set_move(self, move) -> None:
+        """EXPERIMENTAL: set this strip's raw movement-speed byte and re-apply.
+
+        `move` is an int 0-255 (clamped) written to moveIn+moveAll on every
+        segment, bypassing Govee's curated speed table; "off" clears it. Use it
+        to animate band-scroll scenes (e.g. Festival - Carnival) whose Govee
+        range (229-252) renders static on the H617A.
+        """
+        self._move_override = None if move == "off" else max(0, min(255, int(move)))
+        if self._effect:
             await self.async_turn_on(effect=self._effect)
         self.async_write_ha_state()
 

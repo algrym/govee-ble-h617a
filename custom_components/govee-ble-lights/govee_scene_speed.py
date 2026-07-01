@@ -152,3 +152,28 @@ def apply_scene_speed(param: bytes, config: str | None,
                 if value is not None:
                     blob[offset] = value & 0xFF
     return bytes(blob)
+
+
+def apply_move_override(param: bytes, value: int | None) -> bytes:
+    """Force every segment's movement-speed bytes (moveIn + moveAll) to `value`.
+
+    This deliberately bypasses Govee's curated ``speedInfo`` table to reach the
+    off-menu byte range the strip still honours (0-255). It exists for
+    "band-scroll" scenes like Festival - Carnival, whose only motion is
+    area-movement and whose Govee-exposed values (229-252) all render static on
+    the H617A. ``value`` is clamped to a byte; ``None`` leaves the blob
+    untouched. Colour and brightness timing are left alone, so colour-cycling
+    scenes are unaffected. An unknown blob layout degrades to no change.
+    """
+    if value is None:
+        return param
+    try:
+        segments = list(_segment_offsets(param))
+    except ValueError:
+        return param
+    blob = bytearray(param)
+    v = max(0, min(255, int(value)))
+    for seg in segments:
+        blob[seg["movein_d"]] = v
+        blob[seg["moveall_d"]] = v
+    return bytes(blob)

@@ -251,3 +251,57 @@ def test_at_clamps(arr, index, expected):
 def test_segment_offsets_raises_on_bad_blob(blob):
     with pytest.raises(ValueError):
         list(gss._segment_offsets(blob))
+
+
+# --- apply_move_override (experimental off-menu movement byte) ----------------
+
+
+def _carnival():
+    for label, blob, _config in CATALOGUE:
+        if "Carnival" in label:
+            return blob
+    pytest.skip("Carnival not in catalogue")
+
+
+def test_move_override_sets_both_movement_fields():
+    blob = _carnival()
+    out = gss.apply_move_override(blob, 40)
+    assert len(out) == len(blob)
+    for seg in gss._segment_offsets(out):
+        assert out[seg["movein_d"]] == 40
+        assert out[seg["moveall_d"]] == 40
+
+
+@pytest.mark.parametrize("value,expected", [(300, 255), (-5, 0), (0, 0), (255, 255)])
+def test_move_override_clamps_to_byte(value, expected):
+    blob = _carnival()
+    out = gss.apply_move_override(blob, value)
+    seg = next(iter(gss._segment_offsets(out)))
+    assert out[seg["movein_d"]] == expected
+    assert out[seg["moveall_d"]] == expected
+
+
+def test_move_override_none_returns_unchanged():
+    blob = _carnival()
+    assert gss.apply_move_override(blob, None) == blob
+
+
+def test_move_override_touches_only_movement_bytes():
+    blob = _carnival()
+    out = gss.apply_move_override(blob, 40)
+    moved = set()
+    for seg in gss._segment_offsets(blob):
+        moved.add(seg["movein_d"])
+        moved.add(seg["moveall_d"])
+    changed = {i for i in range(len(blob)) if blob[i] != out[i]}
+    assert changed <= moved  # never writes outside moveIn/moveAll
+
+
+def test_move_override_unknown_blob_unchanged():
+    garbage = bytes([5, 0, 0])
+    assert gss.apply_move_override(garbage, 40) == garbage
+
+
+def test_move_override_length_stable_across_catalogue():
+    for _label, blob, _config in CATALOGUE:
+        assert len(gss.apply_move_override(blob, 40)) == len(blob)

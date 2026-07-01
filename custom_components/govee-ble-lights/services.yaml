@@ -21,6 +21,30 @@ set_speed:
       selector:
         text:
 
+set_move:
+  name: Set movement speed (experimental)
+  description: >-
+    Force this strip's raw movement-speed byte (moveIn + moveAll) on every
+    scene segment, bypassing Govee's curated speed table to reach the off-menu
+    range (0-255) the strip still honours. Use it to animate "band-scroll"
+    scenes such as Festival - Carnival, whose Govee-exposed values (229-252) all
+    render static on the H617A. Applies immediately to the current effect and
+    persists across restarts. Lower/higher is per-scene; sweep to taste.
+  target:
+    entity:
+      integration: govee-ble-lights
+      domain: light
+  fields:
+    move:
+      name: Movement byte
+      description: >-
+        An integer 0-255 written to the movement-speed fields, or "off" to clear
+        the override and return to the normal table-based speed.
+      required: true
+      example: 40
+      selector:
+        text:
+
 set_scene_speed:
   name: Set scene speed preset
   description: >-
