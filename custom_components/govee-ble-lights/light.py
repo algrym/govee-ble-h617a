@@ -347,6 +347,13 @@ class GoveeBluetoothLight(RestoreEntity, LightEntity):
             category_name = category.get('categoryName', f"Category {category_idx}")
             for scene_idx, scene in enumerate(category.get('scenes', [])):
                 scene_name = scene.get('sceneName', '').strip()
+                # Festival - Carnival ships on the H617A as five single-colour
+                # segments, so its only motion axis (area-movement) has nothing
+                # to animate: it renders as static colour bands at every speed,
+                # including off-menu movement bytes (verified on hardware
+                # 2026-06-30). Hide it rather than offer a scene that can't play.
+                if self._model == 'H617A' and scene_name == 'Carnival':
+                    continue
                 for light_idx, light_effect in enumerate(scene.get('lightEffects', [])):
                     specials = light_effect.get('specialEffect') or []
                     if not specials:
