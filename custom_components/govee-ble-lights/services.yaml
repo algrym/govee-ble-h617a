@@ -13,9 +13,13 @@ set_speed:
     speed_index:
       name: Speed
       description: >-
-        An integer level (0 = liveliest; higher = calmer, range varies per
-        scene), "auto" (follow the scene's saved/Govee-recommended speed), or
-        "off" (upload the scene baseline untouched).
+        An integer animation-speed level: lower = faster/livelier movement,
+        higher = slower (very high can freeze it). Range varies per scene.
+        IMPORTANT: slower is NOT always calmer-LOOKING — freezing a scrolling
+        scene makes its colours flicker in place, so the most peaceful setting
+        is per-scene; pick it by eye. Or "auto" (follow the scene's
+        saved/Govee-recommended speed) or "off" (upload the scene baseline
+        untouched).
       required: true
       example: "auto"
       selector:
@@ -36,8 +40,10 @@ set_scene_speed:
     speed_index:
       name: Speed
       description: >-
-        An integer to pin this scene's speed (0 = liveliest; higher = calmer),
-        or "auto" to clear the preset back to Govee's per-scene default.
+        An integer to pin this scene's speed (lower = faster/livelier, higher =
+        slower/frozen; the calmest-LOOKING value is per-scene — pick by eye, as
+        a frozen scroll can flicker), or "auto" to clear the preset back to
+        Govee's per-scene default.
       required: true
       example: "auto"
       selector:
